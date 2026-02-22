@@ -1,0 +1,13 @@
+#!/bin/sh
+# 首次启动自定义配置
+
+# 设置时区为上海
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci commit system
+
+# 设置默认主题为 argon
+uci set luci.main.mediaurlbase='/luci-static/argon'
+uci commit luci
+
+exit 0

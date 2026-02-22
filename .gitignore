@@ -1,0 +1,7 @@
+build/
+output/
+cache/
+*.img
+*.img.gz
+*.itb
+*.bin

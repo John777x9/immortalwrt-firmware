@@ -1,0 +1,251 @@
+name: Build ImmortalWrt Firmware
+
+on:
+  # 定时：每周一 UTC 00:00（北京时间周一早8点）
+  schedule:
+    - cron: '0 0 * * 1'
+
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '编译设备'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - x86-64
+          - rax3000m
+          - mt3000
+      clean:
+        description: '全新编译（忽略缓存）'
+        required: false
+        default: false
+        type: boolean
+
+  # 配置变更自动触发
+  push:
+    paths:
+      - 'devices/*.conf'
+      - 'scripts/**'
+      - 'files/**'
+      - 'patches/**'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ─── 确定编译矩阵 ───
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      date: ${{ steps.date.outputs.date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: date
+        run: echo "date=$(date +%Y.%m.%d)" >> $GITHUB_OUTPUT
+
+      - id: set-matrix
+        run: |
+          INPUT="${{ inputs.device }}"
+          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ]; then
+            DEVICES=$(ls devices/*.conf | sed 's|devices/||;s|\.conf||' | jq -R . | jq -sc .)
+          else
+            DEVICES="[\"${INPUT}\"]"
+          fi
+          echo "matrix={\"device\":$DEVICES}" >> $GITHUB_OUTPUT
+          echo "📋 Building devices: $DEVICES"
+
+  # ─── 并行编译 ───
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📋 读取设备配置
+        id: config
+        run: |
+          source devices/${{ matrix.device }}.conf
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "subtarget=$SUBTARGET" >> $GITHUB_OUTPUT
+          echo "device=$DEVICE" >> $GITHUB_OUTPUT
+          echo "description=$DESCRIPTION" >> $GITHUB_OUTPUT
+
+      - name: 💾 释放磁盘空间
+        run: |
+          echo "Before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/share/swift /usr/local/graalvm /usr/local/.ghcup \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo apt-get purge -y azure-cli google-cloud-cli microsoft-edge-stable \
+            google-chrome-stable firefox powershell mono-devel 2>/dev/null || true
+          sudo apt-get autoremove -y && sudo apt-get clean
+          echo "After cleanup:"
+          df -h /
+
+      - name: 🔧 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
+            gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
+            jq lib32gcc-s1 libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
+            libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip \
+            p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils \
+            rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip upx-ucl vim \
+            wget xmlto xxd zlib1g-dev zstd file
+
+      - name: 📦 Clone 源码
+        run: |
+          git clone --depth 1 -b ${{ steps.config.outputs.branch }} \
+            ${{ steps.config.outputs.repo }} immortalwrt
+          cd immortalwrt
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: 🔄 缓存 DL 目录
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: dl-${{ steps.config.outputs.target }}-${{ steps.config.outputs.branch }}-${{ hashFiles(format('devices/{0}.conf', matrix.device)) }}
+          restore-keys: |
+            dl-${{ steps.config.outputs.target }}-${{ steps.config.outputs.branch }}-
+            dl-${{ steps.config.outputs.target }}-
+
+      - name: 🔄 缓存 Toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            immortalwrt/staging_dir/host*
+            immortalwrt/staging_dir/toolchain*
+            immortalwrt/build_dir/host*
+            immortalwrt/build_dir/toolchain*
+          key: toolchain-${{ steps.config.outputs.target }}-${{ steps.config.outputs.subtarget }}-${{ env.COMMIT }}
+          restore-keys: |
+            toolchain-${{ steps.config.outputs.target }}-${{ steps.config.outputs.subtarget }}-
+
+      - name: 📡 更新 Feeds
+        run: |
+          cd immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 📂 注入自定义文件
+        run: |
+          if [ -d "files" ]; then
+            cp -r files immortalwrt/files
+          fi
+
+      - name: ⚙️ 生成 .config
+        run: |
+          cd immortalwrt
+          bash ../scripts/generate-config.sh ../devices/${{ matrix.device }}.conf
+
+      - name: ⬇️ 下载依赖包
+        run: |
+          cd immortalwrt
+          make download -j16
+          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
+
+      - name: 🔨 编译固件
+        run: |
+          cd immortalwrt
+          echo "CPU: $(nproc) cores"
+          echo "RAM: $(free -h | awk '/^Mem:/{print $2}')"
+          df -h /
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 📦 整理固件
+        run: |
+          cd immortalwrt
+          bash ../scripts/post-build.sh ${{ matrix.device }}
+
+      - name: 📤 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.device }}
+          path: output/${{ matrix.device }}/
+          retention-days: 30
+
+  # ─── 发布 Release ───
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    if: success()
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 📥 下载所有固件
+        uses: actions/download-artifact@v4
+        with:
+          path: firmware/
+          pattern: firmware-*
+
+      - name: 📋 生成 Release Notes
+        run: |
+          DATE="${{ needs.prepare.outputs.date }}"
+          cat > release_notes.md << 'HEADER'
+          ## ImmortalWrt 自定义固件
+
+          ### 📦 包含设备
+          HEADER
+
+          # 收集各设备信息
+          for dir in firmware/firmware-*/; do
+            if [ -f "${dir}info.txt" ]; then
+              cat "${dir}info.txt" >> release_notes.md
+            fi
+          done
+
+          cat >> release_notes.md << 'FOOTER'
+
+          ### 🔌 主要插件
+          - **代理**: HomeProxy + Passwall (sing-box 全特性)
+          - **主题**: Argon + 全中文界面
+          - **工具**: ddns-go / ttyd / frpc / netdata / tcpdump
+          - **内核**: nft-tproxy / fullcone / tun
+
+          ### 💡 刷机说明
+          - **x86**: 写入磁盘/虚拟机导入 img
+          - **ARM 设备**: `sysupgrade -n firmware.itb`（不保留配置）
+          - 默认管理地址: `192.168.1.1`
+          - 默认密码: 无（首次登录设置）
+
+          ### ℹ️ 编译信息
+          - 源码: ImmortalWrt master
+          - 编译时间: $(date -u +"%Y-%m-%d %H:%M UTC")
+          FOOTER
+
+      - name: 🚀 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.date }}
+          name: "ImmortalWrt Firmware v${{ needs.prepare.outputs.date }}"
+          body_path: release_notes.md
+          files: |
+            firmware/**/*.img.gz
+            firmware/**/*.itb
+            firmware/**/*.bin
+            firmware/**/*.fip
+            firmware/**/*.manifest
+            firmware/**/*.buildinfo
+            firmware/**/sha256sums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
