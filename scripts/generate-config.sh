@@ -52,7 +52,6 @@ if [ "$LANG" = "zh-cn" ]; then
             echo "CONFIG_PACKAGE_luci-i18n-${app_name}-zh-cn=y" >> .config
         fi
     done
-    # argon-config 特殊处理
     echo "CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y" >> .config
 fi
 
@@ -72,6 +71,25 @@ fi
 
 # --- defconfig 补全 ---
 make defconfig > /dev/null 2>&1
+
+# --- defconfig 后重新确保自定义选项生效 ---
+if [ "$LANG" = "zh-cn" ]; then
+    for pkg in "${PACKAGES[@]}"; do
+        if [[ "$pkg" == +luci-app-* ]]; then
+            app_name="${pkg#+luci-app-}"
+            sed -i "s/# CONFIG_PACKAGE_luci-i18n-${app_name}-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-${app_name}-zh-cn=y/" .config
+        fi
+    done
+    sed -i "s/# CONFIG_PACKAGE_luci-i18n-base-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-base-zh-cn=y/" .config
+    sed -i "s/# CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn is not set/CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y/" .config
+fi
+
+if [ ${#SINGBOX_FEATURES[@]} -gt 0 ]; then
+    for feat in "${SINGBOX_FEATURES[@]}"; do
+        sed -i "s/# CONFIG_SING_BOX_BUILD_${feat} is not set/CONFIG_SING_BOX_BUILD_${feat}=y/" .config
+        grep -q "SING_BOX_BUILD_${feat}" .config || echo "CONFIG_SING_BOX_BUILD_${feat}=y" >> .config
+    done
+fi
 
 PKG_COUNT=$(grep '=y' .config | grep -c 'CONFIG_PACKAGE' || true)
 echo "✅ .config generated: ${PKG_COUNT} packages selected"

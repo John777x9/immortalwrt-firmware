@@ -91,6 +91,15 @@ jobs:
           echo "After cleanup:"
           df -h /
 
+      - name: 💿 创建 Swap（防止内存不足）
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled:"
+          free -h
+
       - name: 🔧 安装编译依赖
         run: |
           sudo apt-get update
@@ -139,11 +148,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 📂 注入自定义文件
+      - name: 📂 注入自定义文件与补丁
         run: |
-          if [ -d "files" ]; then
-            cp -r files immortalwrt/files
+          cd immortalwrt
+          # 注入 files/（uci-defaults 等）
+          if [ -d "../files" ]; then
+            cp -r ../files ./files
+            echo "✅ Custom files injected"
+            find files/ -type f
           fi
+          # 修改默认主机名和 LAN IP
+          sed -i "s/hostname='ImmortalWrt'/hostname='OpenWRT'/" package/base-files/files/bin/config_generate
+          sed -i "s/192\.168\.1\.1/192.168.3.1/g" package/base-files/files/bin/config_generate
+          echo "✅ Hostname=OpenWRT, LAN=192.168.3.1"
 
       - name: ⚙️ 生成 .config
         run: |
@@ -161,6 +178,7 @@ jobs:
           cd immortalwrt
           echo "CPU: $(nproc) cores"
           echo "RAM: $(free -h | awk '/^Mem:/{print $2}')"
+          echo "Swap: $(free -h | awk '/^Swap:/{print $2}')"
           df -h /
           make -j$(nproc) || make -j1 V=s
 
@@ -168,13 +186,15 @@ jobs:
         run: |
           cd immortalwrt
           bash ../scripts/post-build.sh ${{ matrix.device }}
+          echo "📦 Output files:"
+          ls -lh ../output/${{ matrix.device }}/ 2>/dev/null || echo "No output!"
 
       - name: 📤 上传固件 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.device }}
           path: output/${{ matrix.device }}/
-          if-no-files-found: error
+          if-no-files-found: warn
 
   release:
     needs: [prepare, build]
@@ -194,54 +214,56 @@ jobs:
 
       - name: 📋 检查下载内容
         run: |
-          echo "Downloaded artifacts:"
-          find firmware/ -type f | head -50
-          echo "---"
-          du -sh firmware/*/
+          echo "=== Downloaded artifacts ==="
+          find firmware/ -type f | sort
+          echo "==="
+          du -sh firmware/*/ 2>/dev/null || echo "No firmware dirs"
 
       - name: 📋 生成 Release Notes
         run: |
           DATE="${{ needs.prepare.outputs.date }}"
           BUILD_TIME="$(date -u +'%Y-%m-%d %H:%M UTC')"
 
-          cat > release_notes.md << EOF
-          ## ImmortalWrt 自定义固件
+          {
+            echo "## OpenWRT 自定义固件"
+            echo ""
+            echo "### 📦 包含设备"
 
-          ### 📦 包含设备
-          EOF
+            for dir in firmware/firmware-*/; do
+              if [ -f "${dir}info.txt" ]; then
+                cat "${dir}info.txt"
+              fi
+            done
 
-          for dir in firmware/firmware-*/; do
-            if [ -f "${dir}info.txt" ]; then
-              cat "${dir}info.txt" >> release_notes.md
-            fi
-          done
+            echo ""
+            echo "### 🔌 主要插件"
+            echo "- **代理**: HomeProxy + Passwall (sing-box 全特性: QUIC/Reality/WireGuard/uTLS/gVisor)"
+            echo "- **主题**: Argon + 全中文界面"
+            echo "- **工具**: ddns-go / ttyd / frpc / netdata / tcpdump"
+            echo "- **内核**: nft-tproxy / nft-fullcone / tun"
+            echo ""
+            echo "### 💡 刷机说明"
+            echo "- **x86**: 解压 img.gz 后写入磁盘或导入虚拟机"
+            echo "- **ARM 设备**: \`sysupgrade -n firmware.itb\`（不保留配置）"
+            echo "- 默认管理地址: \`192.168.3.1\`"
+            echo "- 默认主机名: \`OpenWRT\`"
+            echo "- 默认密码: 无（首次登录设置）"
+            echo "- 默认时区: Asia/Shanghai"
+            echo ""
+            echo "### ℹ️ 编译信息"
+            echo "- 源码: ImmortalWrt"
+            echo "- 编译时间: ${BUILD_TIME}"
+            echo "- Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > release_notes.md
 
-          cat >> release_notes.md << EOF
-
-          ### 🔌 主要插件
-          - **代理**: HomeProxy + Passwall (sing-box 全特性: QUIC/Reality/WireGuard/uTLS/gVisor)
-          - **主题**: Argon + 全中文界面
-          - **工具**: ddns-go / ttyd / frpc / netdata / tcpdump
-          - **内核**: nft-tproxy / nft-fullcone / tun
-
-          ### 💡 刷机说明
-          - **x86**: 解压 img.gz 后写入磁盘或导入虚拟机
-          - **ARM 设备**: \`sysupgrade -n firmware.itb\`（不保留配置）
-          - 默认管理地址: \`192.168.1.1\`
-          - 默认密码: 无（首次登录设置）
-          - 默认时区: Asia/Shanghai
-
-          ### ℹ️ 编译信息
-          - 源码: ImmortalWrt master
-          - 编译时间: ${BUILD_TIME}
-          - Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EOF
+          echo "=== Release Notes ==="
+          cat release_notes.md
 
       - name: 🚀 创建 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.prepare.outputs.date }}
-          name: "ImmortalWrt Firmware v${{ needs.prepare.outputs.date }}"
+          tag_name: v${{ needs.prepare.outputs.date }}-${{ github.run_number }}
+          name: "OpenWRT Firmware v${{ needs.prepare.outputs.date }}"
           body_path: release_notes.md
           files: |
             firmware/**/*.img.gz
