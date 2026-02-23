@@ -91,12 +91,16 @@ jobs:
           echo "After cleanup:"
           df -h /
 
-      - name: 💿 创建 Swap（防止内存不足）
+      - name: 💿 扩展 Swap（防止内存不足）
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # 关闭已有 swap
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /mnt/swapfile 2>/dev/null || true
+          # 创建新的 8GB swap
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           echo "Swap enabled:"
           free -h
 
