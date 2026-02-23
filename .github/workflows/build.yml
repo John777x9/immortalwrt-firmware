@@ -1,11 +1,9 @@
 name: Build ImmortalWrt Firmware
 
 on:
-  # 定时：每周一 UTC 00:00（北京时间周一早8点）
   schedule:
     - cron: '0 0 * * 1'
 
-  # 手动触发
   workflow_dispatch:
     inputs:
       device:
@@ -24,7 +22,6 @@ on:
         default: false
         type: boolean
 
-  # 配置变更自动触发
   push:
     paths:
       - 'devices/*.conf'
@@ -36,7 +33,6 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  # ─── 确定编译矩阵 ───
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -59,7 +55,6 @@ jobs:
           echo "matrix={\"device\":$DEVICES}" >> $GITHUB_OUTPUT
           echo "📋 Building devices: $DEVICES"
 
-  # ─── 并行编译 ───
   build:
     needs: prepare
     runs-on: ubuntu-latest
@@ -174,14 +169,13 @@ jobs:
           cd immortalwrt
           bash ../scripts/post-build.sh ${{ matrix.device }}
 
-      - name: 📤 上传 Artifact
+      - name: 📤 上传固件 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.device }}
           path: output/${{ matrix.device }}/
-          retention-days: 30
+          if-no-files-found: error
 
-  # ─── 发布 Release ───
   release:
     needs: [prepare, build]
     runs-on: ubuntu-latest
@@ -198,40 +192,50 @@ jobs:
           path: firmware/
           pattern: firmware-*
 
+      - name: 📋 检查下载内容
+        run: |
+          echo "Downloaded artifacts:"
+          find firmware/ -type f | head -50
+          echo "---"
+          du -sh firmware/*/
+
       - name: 📋 生成 Release Notes
         run: |
           DATE="${{ needs.prepare.outputs.date }}"
-          cat > release_notes.md << 'HEADER'
+          BUILD_TIME="$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          cat > release_notes.md << EOF
           ## ImmortalWrt 自定义固件
 
           ### 📦 包含设备
-          HEADER
+          EOF
 
-          # 收集各设备信息
           for dir in firmware/firmware-*/; do
             if [ -f "${dir}info.txt" ]; then
               cat "${dir}info.txt" >> release_notes.md
             fi
           done
 
-          cat >> release_notes.md << 'FOOTER'
+          cat >> release_notes.md << EOF
 
           ### 🔌 主要插件
-          - **代理**: HomeProxy + Passwall (sing-box 全特性)
+          - **代理**: HomeProxy + Passwall (sing-box 全特性: QUIC/Reality/WireGuard/uTLS/gVisor)
           - **主题**: Argon + 全中文界面
           - **工具**: ddns-go / ttyd / frpc / netdata / tcpdump
-          - **内核**: nft-tproxy / fullcone / tun
+          - **内核**: nft-tproxy / nft-fullcone / tun
 
           ### 💡 刷机说明
-          - **x86**: 写入磁盘/虚拟机导入 img
-          - **ARM 设备**: `sysupgrade -n firmware.itb`（不保留配置）
-          - 默认管理地址: `192.168.1.1`
+          - **x86**: 解压 img.gz 后写入磁盘或导入虚拟机
+          - **ARM 设备**: \`sysupgrade -n firmware.itb\`（不保留配置）
+          - 默认管理地址: \`192.168.1.1\`
           - 默认密码: 无（首次登录设置）
+          - 默认时区: Asia/Shanghai
 
           ### ℹ️ 编译信息
           - 源码: ImmortalWrt master
-          - 编译时间: $(date -u +"%Y-%m-%d %H:%M UTC")
-          FOOTER
+          - 编译时间: ${BUILD_TIME}
+          - Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
 
       - name: 🚀 创建 Release
         uses: softprops/action-gh-release@v2
@@ -247,5 +251,6 @@ jobs:
             firmware/**/*.manifest
             firmware/**/*.buildinfo
             firmware/**/sha256sums.txt
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
