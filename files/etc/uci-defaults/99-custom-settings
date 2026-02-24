@@ -14,10 +14,12 @@ else
 fi
 uci commit luci
 
-# 确保 uhttpd 监听
-uci set uhttpd.main.listen_http='0.0.0.0:80'
+# 确保 uhttpd 监听 - 先删再设，避免重复
+uci delete uhttpd.main.listen_http 2>/dev/null
+uci delete uhttpd.main.listen_https 2>/dev/null
+uci add_list uhttpd.main.listen_http='0.0.0.0:80'
 uci add_list uhttpd.main.listen_http='[::]:80'
-uci set uhttpd.main.listen_https='0.0.0.0:443'
+uci add_list uhttpd.main.listen_https='0.0.0.0:443'
 uci add_list uhttpd.main.listen_https='[::]:443'
 uci commit uhttpd
 
@@ -26,5 +28,16 @@ uci set network.lan.ipaddr='192.168.3.1'
 uci set network.lan.proto='static'
 uci set network.lan.netmask='255.255.255.0'
 uci commit network
+
+# 禁用代理自启动，防止未配置时劫持流量
+/etc/init.d/homeproxy disable 2>/dev/null || true
+/etc/init.d/passwall disable 2>/dev/null || true
+/etc/init.d/sing-box disable 2>/dev/null || true
+
+# 确保关键服务自启动
+/etc/init.d/uhttpd enable 2>/dev/null || true
+/etc/init.d/network enable 2>/dev/null || true
+/etc/init.d/firewall enable 2>/dev/null || true
+/etc/init.d/dnsmasq enable 2>/dev/null || true
 
 exit 0
